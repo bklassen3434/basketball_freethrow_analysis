@@ -1,3 +1,9 @@
+
+##### Animation Functions #####
+
+
+
+# Import packages
 import numpy as np
 import json
 from matplotlib.animation import FuncAnimation
@@ -5,9 +11,24 @@ import matplotlib.pyplot as plt
 from biomechanics import *
 import matplotlib.cm as cm
 import matplotlib.colors as colors
-from helper import ball_leaves_hands
+from helper import align_tracking_data
 
-# Default connections between joints. Change these as you please
+# Loading Data (get data from every free throw)
+data = []
+
+# Loop through trial numbers 1 to 125 and load corresponding JSON files
+for trial_number in range(1,126):
+    trial_id = str(trial_number).zfill(4) # Format trial number with leading zeros
+
+    # Open and load JSON data for the current trial
+    with open(f'./data/P0001/BB_FT_P0001_T{trial_id}.json') as json_file:
+        free_throw_data = json.load(json_file)
+        data.append(free_throw_data)
+
+# Grab only data from around the actual shot (30 second before ball release to 15 seconds after)
+data = align_tracking_data(data)
+
+# Connections between joints
 connections = [
     # ("R_EYE", "L_EYE"),
     # ("R_EYE", "NOSE"),
@@ -47,6 +68,7 @@ connections = [
 ]
 
 
+
 def animate_trial(
     trial,
     energy=False,
@@ -75,7 +97,7 @@ def animate_trial(
     - energy: bool
         Whether to show the total kinetic energy of each ligament.
     - efficiency: bool
-        Whether to show efficiencies at each joint.
+        Whether to show kinetic energy transfer efficiencies at each joint.
     - alpha: float
         The parameter for exponential smoothing
     - connections: list of tuples
@@ -109,9 +131,11 @@ def animate_trial(
         The animation object created by the function.
     """
 
+    # Set Jupyter notebook settings for animation if in notebook mode
     if notebook_mode:
         plt.rcParams["animation.html"] = "jshtml"
 
+    # Attempt to import court drawing functionality
     if show_court:
         try:
             from mplbasketball.court3d import draw_court_3d
@@ -119,39 +143,34 @@ def animate_trial(
             print("mplbasketball not installed. Cannot show court.")
             show_court = False
 
-    trial_id = str(trial+1).zfill(4)
-    with open(f'./data/P0001/BB_FT_P0001_T{trial_id}.json', "r") as f:
-        data = json.load(f)
+    player_joint_dict = {} # Dictionary to hold joint positions
+    ball_data_array = [] # List to hold ball position data
 
-    player_joint_dict = {}
-    ball_data_array = []
+    # Determine frames of interest
+    end_frame = 40
+    start_frame = 0
 
-    # N_frames = len(data["tracking"])-1
-
-    end_frame = ball_leaves_hands(trial)
-    start_frame = end_frame - 30
-
+    # Define joints of interest
     joints = ['R_ELBOW', 'L_ELBOW', 'R_KNEE', 'L_KNEE', 'R_HIP', 'L_HIP', 'R_SHOULDER', 'L_SHOULDER']
 
-    # The block of code below returns a dictionary, where each key is a 3D time series for coordinates of a joint.
-    # Note that it is a list of N_frames elements, each of which is a 3-element list.
-    # If you want to use numpy, you will have to cast it into a numpy array.
-    for frame_data in data["tracking"]:
+    # Populate the joint data dictionary and ball data array
+    for frame_data in data[trial]["tracking"]:
         for joint in frame_data["data"]["player"]:
             if joint not in player_joint_dict:
                 player_joint_dict[joint] = []
             player_joint_dict[joint].append(frame_data["data"]["player"][joint])
         ball_data_array.append(frame_data["data"]["ball"])
 
-    # For convenience, we will cast everything to numpy arrays here, but you can keep them as lists if you prefer.
+    # Convert lists to numpy arrays for efficiency
     for joint in player_joint_dict:
         player_joint_dict[joint] = np.array(player_joint_dict[joint])
     ball_data_array = np.array(ball_data_array)
 
-    # Animate the data
+    # Set up the 3D plot
     fig = plt.figure(figsize=(8, 8))
     ax = fig.add_subplot(111, projection="3d")
-    # Set up initial plot properties
+
+    # Configure plot limits and appearance
     ax.set_zlim([0, zlim])
     ax.set_box_aspect([1, 1, 1])
     ax.xaxis.set_pane_color((1.0, 1.0, 1.0, 0.0))
@@ -161,8 +180,7 @@ def animate_trial(
     ax.set_zticks([])
     ax.view_init(elev=elev, azim=azim)
 
-    
-
+    # Set up color bars for energy and efficiency if enabled
     if energy:
         norm = colors.Normalize(vmin=0, vmax=5)
         cmap = cm.coolwarm
@@ -171,36 +189,35 @@ def animate_trial(
         cbar = fig.colorbar(sm, ax=ax, fraction=0.02, pad=0.04)
         cbar.set_label('Kinetic Energy (J)', rotation=270, labelpad=15)
 
-
     if efficiency:
         norm = colors.Normalize(vmin=0, vmax=100)
-        cmap = cm.inferno
+        cmap = cm.magma
         sm = cm.ScalarMappable(cmap=cmap, norm=norm)
         sm.set_array([])
         cbar = fig.colorbar(sm, ax=ax, fraction=0.02, pad=0.04)
         cbar.set_label('Kinetic Energy Efficiency (%)', rotation=270, labelpad=15)
 
-    # Prepare the lines to be updated
-    lines = {
-        connection: ax.plot([], [], [], lw=player_lw)[0]
-        for connection in connections
-    }
-
-    # Prepare the joint efficiencies to be updated
-    joint_eff = {
-        joint: ax.plot([], [], [], 'o', markersize=12)[0]
-        for joint in player_joint_dict
-    }
-
+    # Prepare lines for joints and ball for the animation
+    lines = {connection: ax.plot([], [], [], lw=player_lw)[0] for connection in connections}
+    joint_eff = {joint: ax.plot([], [], [], 'o', markersize=12)[0] for joint in player_joint_dict}
     (ball,) = ax.plot([], [], [], "o", markersize=ball_size, c=ball_color)
 
     def update(frame):
+        """
+        Update function for the animation. This function is called for each frame of the animation.
+        
+        Parameters:
+        -----------
+        - frame: int
+            The current frame number in the animation.
+        """
 
-        # Use the average of the right and left hip to center the view.
+        # Use the average of the right and left hip to center the view
         rh_xy = player_joint_dict["R_HIP"][frame][:2]
         lh_xy = player_joint_dict["L_HIP"][frame][:2]
         mh_xy = (rh_xy + lh_xy) / 2
 
+        # Set plot limits based on mid-hip position
         ax.set_xlim([mh_xy[0] - xbuffer, mh_xy[0] + xbuffer])
         ax.set_ylim([mh_xy[1] - ybuffer, mh_xy[1] + ybuffer])
 
@@ -219,8 +236,10 @@ def animate_trial(
                 player_joint_dict[part1][frame, 2],
                 player_joint_dict[part2][frame, 2],
             ]
+
+            # Update color based on kinetic energy if enabled
             if energy:
-                ke_prev = None
+                ke_prev = None # Variable to store previous kinetic energy
                 if ((part1, part2) in sequence) and (frame < end_frame+1) and (frame >= start_frame):
                     body_part = sequence[(part1, part2)]
                     if ke_prev == None:
@@ -229,24 +248,27 @@ def animate_trial(
                     else:
                         ke_curr = alpha * kinetic_energy_total(body_part, part1, part2, frame, trial) + (1 - alpha) * ke_prev
 
-                    ke_prev = ke_curr
+                    ke_prev = ke_curr # Update previous kinetic energy
 
-                    color = plt.cm.coolwarm(ke_curr)
+                    color = plt.cm.coolwarm(ke_curr) # Color based on current kinetic energy
                 else:
                     color = player_color
             else:
                 color = player_color
+
+            # Set line data and color
             lines[connection].set_data_3d(x, y, z)
             lines[connection].set_color(color)
 
+        # Update color based on kinetic energy transfer efficiency if enabled
         if efficiency:
-            # Plot circles to indicate the efficiency of the energy transfer at each joint
+            # Plot circles to indicate the efficiency of energy transfer at each joint
             for joint in player_joint_dict:
                 if (joint in joints) and (frame < end_frame+1) and (frame >= start_frame):
                     x, y, z = player_joint_dict[joint][frame, :]
 
                     ke_eff = kinetic_energy_efficiency_norm(joint, frame, trial)
-                    color = plt.cm.inferno(ke_eff)
+                    color = plt.cm.magma(ke_eff)
 
                     joint_eff[joint].set_data_3d([x], [y], [z])
                     joint_eff[joint].set_color(color)
@@ -254,7 +276,7 @@ def animate_trial(
                 elif frame > end_frame+1:
                     joint_eff[joint].set_data_3d([], [], [])
 
-        # Update ball data
+        # Update ball position
         x = ball_data_array[frame, 0]
         y = ball_data_array[frame, 1]
         z = ball_data_array[frame, 2]
@@ -273,9 +295,7 @@ def animate_trial(
             horizontalalignment='right',
             bbox=dict(facecolor='white', alpha=0.5, edgecolor='none'))
 
-
-        
-
+    # Draw the basketball court if enabled
     if show_court is True:
         ax.grid(False)
         ax.xaxis.pane.fill = False
@@ -289,9 +309,10 @@ def animate_trial(
         ax.zaxis.line.set_linewidth(0)
         draw_court_3d(ax, origin=np.array([0.0, 0.0]), line_width=2)
 
-    # plt.tight_layout()
     plt.subplots(layout="constrained")
+    # Close the figure to prevent it from displaying immediately
     plt.close()
-
+    
+    # Create the animation with a specified frame rate
     anim = FuncAnimation(fig, update, frames=range(start_frame, end_frame+1), interval=1000 / 30)
     return anim
